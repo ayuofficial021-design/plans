@@ -18,10 +18,12 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardList,
+  CloudSun,
   Download,
   LayoutDashboard,
   ListTodo,
   Plus,
+  RefreshCw,
   Search,
   Target,
   Trash2,
@@ -36,11 +38,26 @@ type CalendarPickerMode = "days" | "months" | "years";
 type PlanLevel = "year" | "month" | "week";
 type PlanStatus = "todo" | "doing" | "done";
 type PlanTaskStatus = "todo" | "scheduled" | "done";
+type WeatherStatus = "idle" | "loading" | "ready" | "error";
 
 type CalendarCategory = {
   id: string;
   name: string;
   color: string;
+};
+
+type WeatherInfo = {
+  status: WeatherStatus;
+  locationLabel: string;
+  temperature: number | null;
+  apparentTemperature: number | null;
+  high: number | null;
+  low: number | null;
+  precipitationProbability: number | null;
+  windSpeed: number | null;
+  condition: string;
+  updatedAt: string | null;
+  isFallbackLocation: boolean;
 };
 
 type CalendarEvent = {
@@ -147,6 +164,24 @@ const eventsStorageKey = "calendar_events";
 const plansStorageKey = "calendar_plans_v1";
 const remindedStorageKey = "calendar_reminded_keys_v1";
 const dayMs = 24 * 60 * 60 * 1000;
+const fallbackWeatherLocation = {
+  latitude: 31.2304,
+  longitude: 121.4737,
+  label: "上海",
+};
+const initialWeatherInfo: WeatherInfo = {
+  status: "idle",
+  locationLabel: "定位中",
+  temperature: null,
+  apparentTemperature: null,
+  high: null,
+  low: null,
+  precipitationProbability: null,
+  windSpeed: null,
+  condition: "获取天气",
+  updatedAt: null,
+  isFallbackLocation: false,
+};
 
 const categories: CalendarCategory[] = [
   { id: "personal", name: "个人", color: "#007aff" },
@@ -839,6 +874,37 @@ function getReminderLabel(value: ReminderMinutes) {
   return reminderOptions.find((option) => option.value === value)?.label ?? "不提醒";
 }
 
+function getWeatherCondition(code: number) {
+  if (code === 0) return "晴";
+  if (code === 1) return "少云";
+  if (code === 2) return "多云";
+  if (code === 3) return "阴";
+  if (code === 45 || code === 48) return "雾";
+  if ((code >= 51 && code <= 57) || (code >= 61 && code <= 67) || (code >= 80 && code <= 82)) return "雨";
+  if ((code >= 71 && code <= 77) || (code >= 85 && code <= 86)) return "雪";
+  if (code >= 95) return "雷雨";
+  return "天气";
+}
+
+function formatWeatherValue(value: number | null, unit = "°") {
+  return value === null || Number.isNaN(value) ? "--" : `${Math.round(value)}${unit}`;
+}
+
+function getBrowserPosition() {
+  return new Promise<GeolocationPosition>((resolve, reject) => {
+    if (!("geolocation" in navigator)) {
+      reject(new Error("Geolocation unavailable"));
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: false,
+      maximumAge: 30 * 60 * 1000,
+      timeout: 5000,
+    });
+  });
+}
+
 function getPlanLevelLabel(level: PlanLevel) {
   return planLevelOptions.find((option) => option.value === level)?.label ?? "月计划";
 }
@@ -1319,6 +1385,7 @@ export default function App() {
   const [planFilter, setPlanFilter] = useState<PlanLevel | "all">("all");
   const [upcomingExpanded, setUpcomingExpanded] = useState(false);
   const [dayPanelExpanded, setDayPanelExpanded] = useState(false);
+  const [weatherInfo, setWeatherInfo] = useState<WeatherInfo>(initialWeatherInfo);
   const [searchQuery, setSearchQuery] = useState("");
   const [toast, setToast] = useState("");
   const toastTimerRef = useRef<number>();
@@ -1342,9 +1409,69 @@ export default function App() {
     toastTimerRef.current = window.setTimeout(() => setToast(""), 2200);
   }, []);
 
+  const loadWeather = useCallback(async () => {
+    setWeatherInfo((current) => ({ ...current, status: "loading" }));
+
+    let latitude = fallbackWeatherLocation.latitude;
+    let longitude = fallbackWeatherLocation.longitude;
+    let locationLabel = fallbackWeatherLocation.label;
+    let isFallbackLocation = true;
+
+    try {
+      const position = await getBrowserPosition();
+      latitude = position.coords.latitude;
+      longitude = position.coords.longitude;
+      locationLabel = "当前位置";
+      isFallbackLocation = false;
+    } catch {
+      locationLabel = fallbackWeatherLocation.label;
+    }
+
+    try {
+      const params = new URLSearchParams({
+        latitude: latitude.toFixed(4),
+        longitude: longitude.toFixed(4),
+        current: "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
+        daily: "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        timezone: "auto",
+        forecast_days: "1",
+      });
+      const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error("Weather request failed");
+      }
+
+      const data = await response.json();
+      setWeatherInfo({
+        status: "ready",
+        locationLabel,
+        temperature: data.current?.temperature_2m ?? null,
+        apparentTemperature: data.current?.apparent_temperature ?? null,
+        high: data.daily?.temperature_2m_max?.[0] ?? null,
+        low: data.daily?.temperature_2m_min?.[0] ?? null,
+        precipitationProbability: data.daily?.precipitation_probability_max?.[0] ?? null,
+        windSpeed: data.current?.wind_speed_10m ?? null,
+        condition: getWeatherCondition(data.current?.weather_code ?? -1),
+        updatedAt: data.current?.time ?? new Date().toISOString(),
+        isFallbackLocation,
+      });
+    } catch {
+      setWeatherInfo((current) => ({
+        ...current,
+        status: "error",
+        condition: "天气不可用",
+        updatedAt: new Date().toISOString(),
+      }));
+    }
+  }, []);
+
   useEffect(() => {
     window.localStorage.setItem(eventsStorageKey, JSON.stringify(events));
   }, [events]);
+
+  useEffect(() => {
+    loadWeather();
+  }, [loadWeather]);
 
   useEffect(() => {
     window.localStorage.setItem(plansStorageKey, JSON.stringify(plans));
@@ -2315,7 +2442,40 @@ export default function App() {
                   <h2>{selectedDate ? formatPanelDate(selectedDate) : "选择日期"}</h2>
                   {selectedDate ? <p>{formatLunarDate(parseDateStr(selectedDate))}</p> : null}
                 </div>
-                {selectedDate === todayStr ? <span className="panel-date-badge">今天</span> : null}
+                <div className="panel-side-info">
+                  {selectedDate === todayStr ? (
+                    <button
+                      className={`weather-card ${weatherInfo.status}`}
+                      type="button"
+                      onClick={loadWeather}
+                      aria-label="刷新今日天气"
+                    >
+                      {weatherInfo.status === "loading" ? <RefreshCw className="weather-spin" size={18} /> : <CloudSun size={19} />}
+                      <span>
+                        <strong>
+                          {weatherInfo.status === "ready"
+                            ? `${formatWeatherValue(weatherInfo.temperature)} ${weatherInfo.condition}`
+                            : weatherInfo.status === "error"
+                              ? "天气不可用"
+                              : "获取天气"}
+                        </strong>
+                        <small>
+                          {weatherInfo.status === "ready"
+                            ? `${weatherInfo.locationLabel}${weatherInfo.isFallbackLocation ? " · 默认" : ""} · ${formatWeatherValue(
+                                weatherInfo.low,
+                              )}/${formatWeatherValue(weatherInfo.high)} · 降雨${formatWeatherValue(
+                                weatherInfo.precipitationProbability,
+                                "%",
+                              )}`
+                            : weatherInfo.status === "loading"
+                              ? "正在更新"
+                              : "点击重试"}
+                        </small>
+                      </span>
+                    </button>
+                  ) : null}
+                  {selectedDate === todayStr ? <span className="panel-date-badge">今天</span> : null}
+                </div>
               </div>
 
               <div className="panel-content">

@@ -537,6 +537,10 @@ select {
   flex: 0 0 auto;
 }
 
+.panel-header > div:first-child {
+  min-width: 0;
+}
+
 .panel-header h2 {
   margin: 0;
   color: var(--text);
@@ -550,6 +554,69 @@ select {
   font-size: 12px;
 }
 
+.panel-side-info {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  gap: 8px;
+  flex: 1 1 auto;
+}
+
+.weather-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  max-width: 260px;
+  padding: 7px 10px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  border: 0.5px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  border-radius: 14px;
+  gap: 7px;
+  text-align: left;
+}
+
+.weather-card strong,
+.weather-card small {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.weather-card strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.15;
+}
+
+.weather-card small {
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.15;
+}
+
+.weather-card.loading svg,
+.weather-spin {
+  animation: weatherSpin 900ms linear infinite;
+}
+
+.weather-card.error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+@keyframes weatherSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .panel-date-badge {
   padding: 4px 10px;
   color: var(--accent);
@@ -558,6 +625,7 @@ select {
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .panel-content {
@@ -1805,6 +1873,21 @@ textarea.form-input {
 
   .lunar-label {
     font-size: 9px;
+  }
+
+  .panel-header {
+    align-items: flex-start;
+    padding-inline: 16px;
+    gap: 8px;
+  }
+
+  .weather-card {
+    max-width: 190px;
+    padding-inline: 8px;
+  }
+
+  .panel-date-badge {
+    display: none;
   }
 
   .color-options,
