@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+  type PointerEvent,
+  type ReactNode,
+} from "react";
 import {
   BarChart3,
   Bell,
@@ -1308,9 +1318,12 @@ export default function App() {
   const [newPlanTaskTitle, setNewPlanTaskTitle] = useState("");
   const [planFilter, setPlanFilter] = useState<PlanLevel | "all">("all");
   const [upcomingExpanded, setUpcomingExpanded] = useState(false);
+  const [dayPanelExpanded, setDayPanelExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [toast, setToast] = useState("");
   const toastTimerRef = useRef<number>();
+  const panelDragStartYRef = useRef(0);
+  const panelDragMovedRef = useRef(false);
   const importInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -1351,7 +1364,28 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (activeView !== "calendar" || calendarPickerMode !== "days") {
+      setDayPanelExpanded(false);
+    }
+  }, [activeView, calendarPickerMode]);
+
   const calendarCells = useMemo(() => buildCalendarCells(currentYear, currentMonth), [currentYear, currentMonth]);
+  const isDayPanelWeekMode = dayPanelExpanded && calendarPickerMode === "days";
+  const displayCalendarCells = useMemo(() => {
+    if (!isDayPanelWeekMode) {
+      return calendarCells;
+    }
+
+    const anchorDate = selectedDate ?? todayStr;
+    const anchorIndex = calendarCells.findIndex((cell) => cell.dateStr === anchorDate);
+    if (anchorIndex < 0) {
+      return calendarCells;
+    }
+
+    const weekStart = Math.floor(anchorIndex / 7) * 7;
+    return calendarCells.slice(weekStart, weekStart + 7);
+  }, [calendarCells, isDayPanelWeekMode, selectedDate, todayStr]);
   const visibleOccurrences = useMemo(() => {
     return expandOccurrences(events, calendarCells[0].dateStr, calendarCells[calendarCells.length - 1].dateStr);
   }, [calendarCells, events]);
@@ -1510,6 +1544,7 @@ export default function App() {
 
   const changeMonth = (delta: number) => {
     const next = new Date(currentYear, currentMonth + delta, 1);
+    setDayPanelExpanded(false);
     setCurrentYear(next.getFullYear());
     setCurrentMonth(next.getMonth());
     setYearPageStart(next.getFullYear() - (next.getFullYear() % 12));
@@ -1526,6 +1561,7 @@ export default function App() {
     updateMonth(todayStr);
     setSelectedDate(todayStr);
     setCalendarPickerMode("days");
+    setDayPanelExpanded(false);
   };
 
   const cycleCalendarPicker = () => {
@@ -1562,6 +1598,7 @@ export default function App() {
   const selectMonthFromPicker = (month: number) => {
     setCurrentMonth(month);
     setCalendarPickerMode("days");
+    setDayPanelExpanded(false);
     if (selectedDate) {
       const selected = parseDateStr(selectedDate);
       if (selected.getFullYear() !== currentYear || selected.getMonth() !== month) {
@@ -1574,9 +1611,45 @@ export default function App() {
     setCurrentYear(year);
     setYearPageStart(year - (year % 12));
     setCalendarPickerMode("months");
+    setDayPanelExpanded(false);
     if (selectedDate && parseDateStr(selectedDate).getFullYear() !== year) {
       setSelectedDate(null);
     }
+  };
+
+  const handlePanelHandlePointerDown = (event: PointerEvent<HTMLButtonElement>) => {
+    panelDragStartYRef.current = event.clientY;
+    panelDragMovedRef.current = false;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handlePanelHandlePointerMove = (event: PointerEvent<HTMLButtonElement>) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) {
+      return;
+    }
+
+    const deltaY = event.clientY - panelDragStartYRef.current;
+    if (Math.abs(deltaY) < 28) {
+      return;
+    }
+
+    panelDragMovedRef.current = true;
+    setDayPanelExpanded(deltaY < 0);
+  };
+
+  const handlePanelHandlePointerUp = (event: PointerEvent<HTMLButtonElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const handlePanelHandleClick = () => {
+    if (panelDragMovedRef.current) {
+      panelDragMovedRef.current = false;
+      return;
+    }
+
+    setDayPanelExpanded((current) => !current);
   };
 
   const openAddSheet = (dateStr = selectedDate ?? todayStr) => {
@@ -2117,9 +2190,16 @@ export default function App() {
                   <span className="weekend">六</span>
                 </div>
 
-                <div className="calendar-grid-wrapper">
-                  <div className="calendar-grid">
-                    {calendarCells.map((cell) => {
+                <div
+                  className={`calendar-grid-wrapper ${isDayPanelWeekMode ? "week-mode" : ""}`}
+                  onClick={() => {
+                    if (dayPanelExpanded) {
+                      setDayPanelExpanded(false);
+                    }
+                  }}
+                >
+                  <div className={`calendar-grid ${isDayPanelWeekMode ? "week-mode" : ""}`}>
+                    {displayCalendarCells.map((cell) => {
                       const dayOccurrences = occurrencesByDate[cell.dateStr] ?? [];
                       const dayDeadlines = deadlinesByDate[cell.dateStr] ?? [];
                       const colors = Array.from(new Set(dayOccurrences.map((occurrence) => getCategory(occurrence.event.calendarId).color)));
@@ -2218,8 +2298,18 @@ export default function App() {
               </div>
             ) : null}
 
-            <section className="bottom-panel" aria-label="所选日期事件">
-              <div className="panel-handle" aria-hidden="true" />
+            <section className={`bottom-panel ${dayPanelExpanded ? "expanded" : ""}`} aria-label="所选日期事件">
+              <button
+                className="panel-handle"
+                type="button"
+                aria-label={dayPanelExpanded ? "收起单日事项" : "展开单日事项"}
+                aria-expanded={dayPanelExpanded}
+                onClick={handlePanelHandleClick}
+                onPointerDown={handlePanelHandlePointerDown}
+                onPointerMove={handlePanelHandlePointerMove}
+                onPointerUp={handlePanelHandlePointerUp}
+                onPointerCancel={handlePanelHandlePointerUp}
+              />
               <div className="panel-header">
                 <div>
                   <h2>{selectedDate ? formatPanelDate(selectedDate) : "选择日期"}</h2>

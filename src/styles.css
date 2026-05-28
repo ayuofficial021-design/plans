@@ -272,6 +272,15 @@ select {
   padding: 8px 8px 6px;
   background: var(--surface);
   flex: 1 1 auto;
+  transition:
+    flex-basis 220ms ease,
+    padding 220ms ease;
+}
+
+.calendar-grid-wrapper.week-mode {
+  min-height: 74px;
+  padding: 6px 8px;
+  flex: 0 0 82px;
 }
 
 .calendar-grid {
@@ -281,6 +290,10 @@ select {
   width: 100%;
   min-height: 0;
   gap: 0;
+}
+
+.calendar-grid.week-mode {
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .day-cell {
@@ -465,6 +478,16 @@ select {
   border-radius: 0;
   box-shadow: var(--shadow-strong);
   flex: 0 0 auto;
+  transition:
+    min-height 220ms ease,
+    max-height 220ms ease,
+    flex 220ms ease;
+}
+
+.bottom-panel.expanded {
+  min-height: 0;
+  max-height: none;
+  flex: 1 1 auto;
 }
 
 .panel-handle,
@@ -475,6 +498,33 @@ select {
   background: var(--handle);
   border-radius: 999px;
   flex: 0 0 auto;
+}
+
+.panel-handle {
+  position: relative;
+  width: 54px;
+  height: 20px;
+  margin: 0 auto;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  cursor: grab;
+  touch-action: none;
+}
+
+.panel-handle::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  right: 10px;
+  height: 4px;
+  background: var(--handle);
+  border-radius: 999px;
+}
+
+.panel-handle:active {
+  cursor: grabbing;
 }
 
 .panel-header {
