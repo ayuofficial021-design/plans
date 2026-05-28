@@ -1,6 +1,7 @@
 node_modules
 dist
 meeting_01_extract
+.env
 .DS_Store
 *.local
 npm-debug.log*
