@@ -9,6 +9,7 @@ import {
   type PointerEvent,
   type ReactNode,
 } from "react";
+import { createClient, type User } from "@supabase/supabase-js";
 import {
   BarChart3,
   Bell,
@@ -39,6 +40,7 @@ type PlanLevel = "year" | "month" | "week";
 type PlanStatus = "todo" | "doing" | "done";
 type PlanTaskStatus = "todo" | "scheduled" | "done";
 type WeatherStatus = "idle" | "loading" | "ready" | "error";
+type CloudStatus = "idle" | "loading" | "ready" | "error";
 
 type CalendarCategory = {
   id: string;
@@ -58,6 +60,19 @@ type WeatherInfo = {
   condition: string;
   updatedAt: string | null;
   isFallbackLocation: boolean;
+};
+
+type CloudSnapshot = {
+  events: CalendarEvent[];
+  plans: PlanItem[];
+  updatedAt: string;
+};
+
+type CloudSyncState = {
+  status: CloudStatus;
+  message: string;
+  cloudUpdatedAt: string | null;
+  localUpdatedAt: string | null;
 };
 
 type CalendarEvent = {
@@ -163,7 +178,12 @@ type ScheduleTaskDraft = {
 const eventsStorageKey = "calendar_events";
 const plansStorageKey = "calendar_plans_v1";
 const remindedStorageKey = "calendar_reminded_keys_v1";
+const cloudLocalUpdatedKey = "calendar_cloud_local_updated_at";
+const cloudSnapshotTable = "calendar_snapshots";
 const dayMs = 24 * 60 * 60 * 1000;
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+const supabase = supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null;
 const fallbackWeatherLocation = {
   latitude: 31.2304,
   longitude: 121.4737,
@@ -694,6 +714,42 @@ function loadInitialPlans() {
   return stored.length > 0 ? stored : createSamplePlans(new Date());
 }
 
+function getStoredLocalUpdatedAt() {
+  try {
+    return window.localStorage.getItem(cloudLocalUpdatedKey);
+  } catch {
+    return null;
+  }
+}
+
+function setStoredLocalUpdatedAt(value: string) {
+  try {
+    window.localStorage.setItem(cloudLocalUpdatedKey, value);
+  } catch {
+    // Local sync metadata is helpful but not critical.
+  }
+}
+
+function normalizeSnapshotPayload(payload: unknown): CloudSnapshot | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const record = payload as { events?: unknown; plans?: unknown; updatedAt?: unknown; updated_at?: unknown };
+  const events = Array.isArray(record.events)
+    ? record.events.map(normalizeEvent).filter((event): event is CalendarEvent => event !== null)
+    : [];
+  const plans = Array.isArray(record.plans)
+    ? connectPlanHierarchy(record.plans.map(normalizePlan).filter((plan): plan is PlanItem => plan !== null))
+    : [];
+
+  return {
+    events,
+    plans,
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : typeof record.updated_at === "string" ? record.updated_at : "",
+  };
+}
+
 function createDraft(date: string, event?: CalendarEvent): EventDraft {
   return {
     title: event?.title ?? "",
@@ -860,6 +916,19 @@ function formatFullDate(dateStr: string) {
 function formatShortDate(dateStr: string) {
   const date = parseDateStr(dateStr);
   return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+function formatSyncTime(value: string | null) {
+  if (!value) {
+    return "暂无";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "暂无";
+  }
+
+  return `${date.getMonth() + 1}/${date.getDate()} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 }
 
 function formatTime(event: CalendarEvent) {
@@ -1386,6 +1455,15 @@ export default function App() {
   const [upcomingExpanded, setUpcomingExpanded] = useState(false);
   const [dayPanelExpanded, setDayPanelExpanded] = useState(false);
   const [weatherInfo, setWeatherInfo] = useState<WeatherInfo>(initialWeatherInfo);
+  const [cloudUser, setCloudUser] = useState<User | null>(null);
+  const [cloudEmail, setCloudEmail] = useState("");
+  const [cloudPassword, setCloudPassword] = useState("");
+  const [cloudSync, setCloudSync] = useState<CloudSyncState>(() => ({
+    status: supabase ? "idle" : "error",
+    message: supabase ? "未登录云同步" : "未配置 Supabase",
+    cloudUpdatedAt: null,
+    localUpdatedAt: getStoredLocalUpdatedAt(),
+  }));
   const [searchQuery, setSearchQuery] = useState("");
   const [toast, setToast] = useState("");
   const toastTimerRef = useRef<number>();
@@ -1467,6 +1545,9 @@ export default function App() {
 
   useEffect(() => {
     window.localStorage.setItem(eventsStorageKey, JSON.stringify(events));
+    const updatedAt = new Date().toISOString();
+    setStoredLocalUpdatedAt(updatedAt);
+    setCloudSync((current) => ({ ...current, localUpdatedAt: updatedAt }));
   }, [events]);
 
   useEffect(() => {
@@ -1474,7 +1555,38 @@ export default function App() {
   }, [loadWeather]);
 
   useEffect(() => {
+    if (!supabase) {
+      return;
+    }
+
+    supabase.auth.getUser().then(({ data }) => {
+      setCloudUser(data.user ?? null);
+      if (data.user?.email) {
+        setCloudEmail(data.user.email);
+        setCloudSync((current) => ({ ...current, status: "ready", message: "云同步已登录" }));
+      }
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setCloudUser(session?.user ?? null);
+      if (session?.user?.email) {
+        setCloudEmail(session.user.email);
+        setCloudSync((current) => ({ ...current, status: "ready", message: "云同步已登录" }));
+      } else {
+        setCloudSync((current) => ({ ...current, status: "idle", message: "未登录云同步" }));
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
     window.localStorage.setItem(plansStorageKey, JSON.stringify(plans));
+    const updatedAt = new Date().toISOString();
+    setStoredLocalUpdatedAt(updatedAt);
+    setCloudSync((current) => ({ ...current, localUpdatedAt: updatedAt }));
   }, [plans]);
 
   useEffect(() => {
@@ -2218,6 +2330,119 @@ export default function App() {
     } catch {
       showToast("导入失败，请检查 JSON 文件");
     }
+  };
+
+  const handleCloudAuth = async (mode: "signIn" | "signUp") => {
+    if (!supabase) {
+      showToast("请先配置 Supabase 环境变量");
+      return;
+    }
+
+    const email = cloudEmail.trim();
+    if (!email || cloudPassword.length < 6) {
+      showToast("请输入邮箱和至少 6 位密码");
+      return;
+    }
+
+    setCloudSync((current) => ({ ...current, status: "loading", message: mode === "signIn" ? "正在登录..." : "正在注册..." }));
+    const result =
+      mode === "signIn"
+        ? await supabase.auth.signInWithPassword({ email, password: cloudPassword })
+        : await supabase.auth.signUp({ email, password: cloudPassword });
+
+    if (result.error) {
+      setCloudSync((current) => ({ ...current, status: "error", message: result.error.message }));
+      showToast(result.error.message);
+      return;
+    }
+
+    setCloudUser(result.data.user ?? result.data.session?.user ?? null);
+    setCloudPassword("");
+    setCloudSync((current) => ({
+      ...current,
+      status: "ready",
+      message: mode === "signIn" ? "登录成功" : "注册成功，请按邮箱提示确认",
+    }));
+    showToast(mode === "signIn" ? "云同步已登录" : "注册成功");
+  };
+
+  const handleCloudSignOut = async () => {
+    if (!supabase) {
+      return;
+    }
+
+    await supabase.auth.signOut();
+    setCloudUser(null);
+    setCloudPassword("");
+    setCloudSync((current) => ({ ...current, status: "idle", message: "已退出云同步" }));
+  };
+
+  const uploadCloudSnapshot = async () => {
+    if (!supabase) {
+      showToast("请先配置 Supabase");
+      return;
+    }
+
+    if (!cloudUser) {
+      showToast("请先登录云同步");
+      return;
+    }
+
+    const updatedAt = new Date().toISOString();
+    setCloudSync((current) => ({ ...current, status: "loading", message: "正在上传云端..." }));
+    const payload = { events, plans, updatedAt };
+    const { error } = await supabase.from(cloudSnapshotTable).upsert(
+      {
+        user_id: cloudUser.id,
+        data: payload,
+        updated_at: updatedAt,
+      },
+      { onConflict: "user_id" },
+    );
+
+    if (error) {
+      setCloudSync((current) => ({ ...current, status: "error", message: error.message }));
+      showToast(error.message);
+      return;
+    }
+
+    setStoredLocalUpdatedAt(updatedAt);
+    setCloudSync({ status: "ready", message: "已上传到云端", cloudUpdatedAt: updatedAt, localUpdatedAt: updatedAt });
+    showToast("已上传到云端");
+  };
+
+  const restoreCloudSnapshot = async () => {
+    if (!supabase) {
+      showToast("请先配置 Supabase");
+      return;
+    }
+
+    if (!cloudUser) {
+      showToast("请先登录云同步");
+      return;
+    }
+
+    setCloudSync((current) => ({ ...current, status: "loading", message: "正在读取云端..." }));
+    const { data, error } = await supabase.from(cloudSnapshotTable).select("data, updated_at").eq("user_id", cloudUser.id).maybeSingle();
+    if (error) {
+      setCloudSync((current) => ({ ...current, status: "error", message: error.message }));
+      showToast(error.message);
+      return;
+    }
+
+    const snapshot = normalizeSnapshotPayload(data?.data);
+    if (!snapshot) {
+      setCloudSync((current) => ({ ...current, status: "idle", message: "云端暂无备份" }));
+      showToast("云端暂无备份");
+      return;
+    }
+
+    setEvents(snapshot.events);
+    setPlans(snapshot.plans);
+    const updatedAt = typeof data?.updated_at === "string" ? data.updated_at : snapshot.updatedAt || new Date().toISOString();
+    setStoredLocalUpdatedAt(updatedAt);
+    setCloudSync({ status: "ready", message: "已从云端恢复", cloudUpdatedAt: updatedAt, localUpdatedAt: updatedAt });
+    showToast("已从云端恢复");
   };
 
   const requestNotifications = () => {
@@ -3392,6 +3617,83 @@ export default function App() {
               </button>
             </div>
             <input ref={importInputRef} hidden accept="application/json,.json" type="file" onChange={handleImportFile} />
+            <section className="cloud-sync-box" aria-label="云同步">
+              <div className="cloud-sync-header">
+                <div>
+                  <h3>云同步</h3>
+                  <p>{cloudSync.message}</p>
+                </div>
+                {cloudSync.status === "loading" ? <RefreshCw className="weather-spin" size={18} /> : <CloudSun size={18} />}
+              </div>
+              <div className="sync-meta-grid">
+                <span>本地更新：{formatSyncTime(cloudSync.localUpdatedAt)}</span>
+                <span>云端更新：{formatSyncTime(cloudSync.cloudUpdatedAt)}</span>
+              </div>
+              {!supabase ? (
+                <div className="sync-help">
+                  <strong>请先配置 Supabase</strong>
+                  <span>在 .env 中填写 VITE_SUPABASE_URL 和 VITE_SUPABASE_ANON_KEY 后重新启动本地服务。</span>
+                </div>
+              ) : cloudUser ? (
+                <>
+                  <div className="sync-account">
+                    <span>{cloudUser.email}</span>
+                    <button type="button" onClick={handleCloudSignOut}>
+                      退出
+                    </button>
+                  </div>
+                  <div className="sync-actions">
+                    <button className="btn btn-primary" type="button" onClick={uploadCloudSnapshot} disabled={cloudSync.status === "loading"}>
+                      上传云端
+                    </button>
+                    <button className="btn btn-secondary" type="button" onClick={restoreCloudSnapshot} disabled={cloudSync.status === "loading"}>
+                      从云端恢复
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <label className="form-group">
+                    <span className="form-label">邮箱</span>
+                    <input
+                      className="form-input"
+                      type="email"
+                      value={cloudEmail}
+                      onChange={(event) => setCloudEmail(event.target.value)}
+                      placeholder="you@example.com"
+                    />
+                  </label>
+                  <label className="form-group">
+                    <span className="form-label">密码</span>
+                    <input
+                      className="form-input"
+                      type="password"
+                      value={cloudPassword}
+                      onChange={(event) => setCloudPassword(event.target.value)}
+                      placeholder="至少 6 位"
+                    />
+                  </label>
+                  <div className="sync-actions">
+                    <button
+                      className="btn btn-primary"
+                      type="button"
+                      onClick={() => handleCloudAuth("signIn")}
+                      disabled={cloudSync.status === "loading"}
+                    >
+                      登录
+                    </button>
+                    <button
+                      className="btn btn-secondary"
+                      type="button"
+                      onClick={() => handleCloudAuth("signUp")}
+                      disabled={cloudSync.status === "loading"}
+                    >
+                      注册
+                    </button>
+                  </div>
+                </>
+              )}
+            </section>
             <button className="tool-row" type="button" onClick={() => importInputRef.current?.click()}>
               <Upload size={19} />
               <span>导入 JSON</span>
